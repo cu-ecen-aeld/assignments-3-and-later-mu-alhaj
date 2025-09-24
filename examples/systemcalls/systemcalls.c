@@ -1,4 +1,8 @@
 #include "systemcalls.h"
+#include <stdlib.h>
+#include <unistd.h> // fork(), execv(), dup2, close()
+#include <sys/wait.h> // waitpid(), WIFEXITED, WEXITSTATUS
+#include <fcntl.h> // open()
 
 /**
  * @param cmd the command to execute with system()
@@ -28,7 +32,7 @@ bool do_system(const char *cmd)
     if (WIFEXITED(ret) && WEXITSTATUS(ret) == 0)    // command exited with status 0.
         return true;
     
-    return false
+    return false;
 }
 
 /**
