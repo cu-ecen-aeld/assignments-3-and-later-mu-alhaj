@@ -16,8 +16,19 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
+    // check for valid input.
+    if (cmd == NULL)
+        return false;
 
-    return true;
+    int ret = system(cmd);
+    if (ret == -1)
+        return false; // child process could not be created or its status could not be retreived.
+
+    // interpret the return value from system, to check if command executed successfully.
+    if (WIFEXITED(ret) && WEXITSTATUS(ret) == 0)    // command exited with status 0.
+        return true;
+    
+    return false
 }
 
 /**
@@ -47,7 +58,7 @@ bool do_exec(int count, ...)
     command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
     // and may be removed
-    command[count] = command[count];
+    //command[count] = command[count];
 
 /*
  * TODO:
@@ -58,7 +69,27 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
+    
+    int pid = fork();
+    if (pid == -1 )
+        return false; // fork failed
 
+    if (pid == 0) // child process
+    {
+        execv( command[0], &command[1]); // should not return!!
+        return false;
+    }
+    else // parent
+    {
+        int status = 0;
+        if (waitpid(pid, &status, 0 ) == -1)
+            return false;  // wait pid failed
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0)    // command exited with status 0.
+            return true;
+        else
+            return false;
+    }
+    
     va_end(args);
 
     return true;
@@ -82,7 +113,7 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
     // and may be removed
-    command[count] = command[count];
+    //command[count] = command[count];
 
 
 /*
@@ -92,6 +123,37 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
+
+    int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+    if (fd < 0)
+        return false;
+
+    int pid = fork();
+    if (pid == -1 )
+        return false; // fork failed
+
+    if (pid == 0) // child process
+    {
+        if (dup2(fd, 1) < 0)
+        {
+            close(fd);
+            return false;
+        }
+        
+        execv( command[0], &command[1]); // should not return!!
+        return false;
+    }
+    else // parent
+    {
+        close (fd);
+        int status = 0;
+        if (waitpid(pid, &status, 0 ) == -1)
+            return false;  // wait pid failed
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0)    // command exited with status 0.
+            return true;
+        else
+            return false;
+    }
 
     va_end(args);
 
