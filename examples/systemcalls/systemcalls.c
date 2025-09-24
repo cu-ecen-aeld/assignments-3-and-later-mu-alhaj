@@ -80,8 +80,8 @@ bool do_exec(int count, ...)
 
     if (pid == 0) // child process
     {
-        execv( command[0], &command[1]); // should not return!!
-        return false;
+        execv( command[0], command); // should not return!!
+        exit(-1);
     }
     else // parent
     {
@@ -141,10 +141,10 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
         if (dup2(fd, 1) < 0)
         {
             close(fd);
-            return false;
+            exit(-1);
         }
         
-        execv( command[0], &command[1]); // should not return!!
+        execv( command[0], command); // should not return!!
         return false;
     }
     else // parent
