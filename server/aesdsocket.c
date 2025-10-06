@@ -19,9 +19,28 @@ volatile sig_atomic_t stop_requested = 0;
 int get_client_ip(struct sockaddr_storage client_addr, char* ipstr, size_t ipstr_len);
 void handle_signal( int signo );
 
-int main (void)
+int main ( int argc, char *argv[])
 {
 	openlog( "aesdsocket", LOG_PID | LOG_CONS, LOG_USER );
+
+	int d_mode = 0;
+	int opt;
+
+	while ((opt = getopt(argc, argv, "d")) != -1)
+	{
+		switch (opt)
+		{
+		case 'd':
+			d_mode = 1;
+			break;
+		
+		default:
+			printf("Usage: %s [-d]\n", argv[0]);
+			exit(1);
+		}
+	}
+	
+
 	struct addrinfo hints;
 	struct addrinfo *p_res;
 
@@ -68,6 +87,39 @@ int main (void)
 
 	printf("socket was created and bound to port %s \n", PORT);
 	free(p_res);
+
+	// release the daemon, if requested.
+	if (d_mode)
+	{
+		pid_t pid = fork();
+		if (pid < 0)
+		{
+			printf("fialed to fork");
+			close(sock_fd);
+			exit(1);
+		}
+		if (pid > 0)
+		{
+			// exit parent.
+			exit(0);
+		}
+		
+		// create a new session, detaches from terminal
+		if (setsid() < 0)
+		{
+			printf("setsid failed\n");
+			close(sock_fd);
+			exit(1);
+		}
+
+		// change dir to avoid locking local dir.
+		chdir("/");
+
+		// redirect output/in , daemon should not use terminal.
+		freopen("/dev/null", "r", stdin);
+		freopen("/dev/null", "w", stdout);
+		freopen("/dev/null", "w", stderr);
+	}
 
 	if (listen(sock_fd, 5) < 0)
 	{
