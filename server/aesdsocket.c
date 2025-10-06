@@ -6,13 +6,18 @@
 #include <unistd.h> //close
 #include <syslog.h>
 #include <fcntl.h> // open(), flags O_CREAT ..
+#include <signal.h>
 
 #define PORT "9000"
 #define BUF_SIZE 1024
 #define DATA_FILE_PATH "/var/tmp/aesdsocketdata"
 
+// Global variables
+volatile sig_atomic_t stop_requested = 0;
+
 /*Private function declarations*/
 int get_client_ip(struct sockaddr_storage client_addr, char* ipstr, size_t ipstr_len);
+void handle_signal( int signo );
 
 int main (void)
 {
@@ -44,6 +49,14 @@ int main (void)
 	}
 
 	//TODO: Allow address reuse.
+	int optval = 1;
+	if(setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0)
+	{
+		printf("failed to allow address reuse");
+		free(p_res);
+		close(sock_fd);
+		exit(1);
+	}
 
 	if (bind(sock_fd, p_res->ai_addr, p_res->ai_addrlen) == -1)
 	{
@@ -63,13 +76,21 @@ int main (void)
 		exit(1);
 	}
 
+	// register signal handler before goint into while
+	struct sigaction sa = {0};
+	sa.sa_handler = handle_signal;
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+
 	char buffer[BUF_SIZE];
-	while (1)
+	int client_fd; 
+	while (!stop_requested)
 	{
 		struct sockaddr_storage client_addr;
 		socklen_t client_addr_len = sizeof(client_addr);
 
-		int client_fd = accept(sock_fd, (struct sockaddr*)&client_addr, &client_addr_len);
+		client_fd = accept(sock_fd, (struct sockaddr*)&client_addr, &client_addr_len);
+		if (stop_requested) break;
 		if (client_fd<0)
 		{
 			printf("accept failed\n");
@@ -78,7 +99,9 @@ int main (void)
 		}
 
 		char ipstr[INET6_ADDRSTRLEN];
-		if (get_client_ip(client_addr, ipstr, INET6_ADDRSTRLEN) != 0)
+		int res = get_client_ip(client_addr, ipstr, INET6_ADDRSTRLEN);
+		if (stop_requested) break;
+		if (res != 0)
 		{
 			close(sock_fd);
 			close(client_fd);
@@ -89,6 +112,7 @@ int main (void)
 		printf("Accepted connection from %s\n", ipstr);
 
 		int data_fd= open(DATA_FILE_PATH, O_CREAT|O_WRONLY|O_APPEND, 0644);
+		if (stop_requested) break;
 		if(data_fd == -1 )
 		{
 			printf("failed to open data file");
@@ -117,7 +141,10 @@ int main (void)
 		syslog(LOG_INFO, "Closed connection from %s", ipstr);
 		printf("Closed connection from %s\n", ipstr);
 	}
-	
+
+	// close connection and remove data file
+	close(client_fd);
+	remove(DATA_FILE_PATH);
 	closelog();
 	return 0;
 }
@@ -145,4 +172,14 @@ int get_client_ip(struct sockaddr_storage client_addr, char* ipstr, size_t ipstr
 	}
 	inet_ntop(client_addr.ss_family, addr, ipstr, ipstr_len);
 	return 0;
+}
+
+void handle_signal( int signo )
+{
+	if (signo == SIGINT || signo == SIGTERM)
+	{
+		syslog(LOG_INFO, "Caught signal, exiting");
+		printf("Caught signal, exiting\n");
+		stop_requested = 1;
+	}
 }
