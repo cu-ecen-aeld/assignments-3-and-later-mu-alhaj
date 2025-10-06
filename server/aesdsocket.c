@@ -114,6 +114,8 @@ int main (void)
 		
 
 		close(client_fd);
+		syslog(LOG_INFO, "Closed connection from %s", ipstr);
+		printf("Closed connection from %s\n", ipstr);
 	}
 	
 	closelog();
