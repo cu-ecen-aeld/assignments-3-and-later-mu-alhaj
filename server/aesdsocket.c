@@ -7,6 +7,9 @@
 #include <syslog.h>
 #include <fcntl.h> // open(), flags O_CREAT ..
 #include <signal.h>
+#include <pthread.h>
+#include "queue.h"
+#include <stdatomic.h>
 
 #define PORT "9000"
 #define BUF_SIZE 1024
@@ -14,10 +17,30 @@
 
 // Global variables
 volatile sig_atomic_t stop_requested = 0;
+pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Local data types
+typedef struct thread_slist_s thread_slist_t;
+struct thread_slist_s
+{
+	pthread_t tid;
+	atomic_int thread_done;
+	SLIST_ENTRY(thread_slist_s) entries;
+};
+
+typedef struct 
+{
+	int client_fd;
+	char ipstr[INET6_ADDRSTRLEN];
+	atomic_int *p_thread_done;
+}thread_args_t;
+
 
 /*Private function declarations*/
 int get_client_ip(struct sockaddr_storage client_addr, char* ipstr, size_t ipstr_len);
 void handle_signal( int signo );
+void *thread_handle_client(void *arg);
+void *thread_timestamp(void *arg);
 
 int main ( int argc, char *argv[])
 {
@@ -63,7 +86,7 @@ int main ( int argc, char *argv[])
 	if (sock_fd == -1)
 	{
 		printf("failed to create a socket");
-		free(p_res);
+		freeaddrinfo(p_res);
 		exit(1);
 	}
 
@@ -72,7 +95,7 @@ int main ( int argc, char *argv[])
 	if(setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0)
 	{
 		printf("failed to allow address reuse");
-		free(p_res);
+		freeaddrinfo(p_res);
 		close(sock_fd);
 		exit(1);
 	}
@@ -80,13 +103,13 @@ int main ( int argc, char *argv[])
 	if (bind(sock_fd, p_res->ai_addr, p_res->ai_addrlen) == -1)
 	{
 		printf("failed to bind the socket\n");
-		free(p_res);
+		freeaddrinfo(p_res);
 		close(sock_fd);
 		exit(1);
 	}
 
 	printf("socket was created and bound to port %s \n", PORT);
-	free(p_res);
+	freeaddrinfo(p_res);
 
 	// release the daemon, if requested.
 	if (d_mode)
@@ -121,6 +144,10 @@ int main ( int argc, char *argv[])
 		freopen("/dev/null", "w", stderr);
 	}
 
+	// start timestamp thread after forking.
+	pthread_t ts_tid;
+	pthread_create(&ts_tid, NULL, thread_timestamp, NULL);
+
 	if (listen(sock_fd, 5) < 0)
 	{
 		printf("listen failed\n");
@@ -134,14 +161,16 @@ int main ( int argc, char *argv[])
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGTERM, &sa, NULL);
 
-	char buffer[BUF_SIZE];
-	int client_fd; 
+	// initialize the linked list
+	SLIST_HEAD(thread_slist_head, thread_slist_s)  thread_list;
+	SLIST_INIT(&thread_list);
+
 	while (!stop_requested)
 	{
 		struct sockaddr_storage client_addr;
 		socklen_t client_addr_len = sizeof(client_addr);
 
-		client_fd = accept(sock_fd, (struct sockaddr*)&client_addr, &client_addr_len);
+		int client_fd = accept(sock_fd, (struct sockaddr*)&client_addr, &client_addr_len);
 		if (stop_requested) break;
 		if (client_fd<0)
 		{
@@ -163,44 +192,75 @@ int main ( int argc, char *argv[])
 		syslog(LOG_INFO, "Accepted connection from %s", ipstr);
 		printf("Accepted connection from %s\n", ipstr);
 
-		int data_fd= open(DATA_FILE_PATH, O_CREAT|O_WRONLY|O_APPEND, 0644);
-		if (stop_requested) break;
-		if(data_fd == -1 )
-		{
-			printf("failed to open data file");
-			exit(1);
-		}
+		// thread to handle recv & send from connected client.
+		pthread_t tid;
+		// package the args that will be sent to thread in a struct
+		thread_args_t * p_thread_args = malloc(sizeof(thread_args_t));
+		p_thread_args->client_fd = client_fd;
+		memcpy(&(p_thread_args->ipstr), &ipstr, INET6_ADDRSTRLEN);
 
-		// receive until new line
-		int bytes_read= 0;
-		while ((bytes_read = recv(client_fd, buffer, BUF_SIZE, 0)) > 0)
+		// create a thread node, a pointer to thread done will be sent to thread
+		// so thread will be able to tell when it is done.
+		thread_slist_t *p_new_node = malloc(sizeof(thread_slist_t));
+		if ( p_new_node == NULL )
 		{
-			write(data_fd, buffer, bytes_read);
-			if(memchr(buffer, '\n', bytes_read)) break;
+			printf("failed to malloc new node for thread id");
 		}
-		close(data_fd);
+		p_new_node->thread_done = 0;
+		p_thread_args->p_thread_done = &(p_new_node->thread_done);
 
-		// send collected data
-		data_fd = open(DATA_FILE_PATH, O_RDONLY);
-		while ((bytes_read = read(data_fd, buffer, BUF_SIZE)) > 0)
+		// TODO: you need to send ipstr to thread to be able to log closing connection.
+		if (pthread_create(&tid, NULL, thread_handle_client, p_thread_args) == 0)
 		{
-			send(client_fd, buffer, bytes_read, 0);
+			// save tid to linked list.
+			p_new_node->tid = tid;
+			SLIST_INSERT_HEAD(&thread_list, p_new_node, entries);
 		}
-		close(data_fd);
+		else
+		{
+			free(p_new_node);
+			free(p_thread_args);
+			close(client_fd);
+			printf("failed to create a thread.");
+		}
 		
-
-		close(client_fd);
-		syslog(LOG_INFO, "Closed connection from %s", ipstr);
-		printf("Closed connection from %s\n", ipstr);
+		// iterate through the thread list and join finished threads.
+		thread_slist_t *p_node;
+		thread_slist_t *p_tmp_node;
+		SLIST_FOREACH_SAFE(p_node, &thread_list, entries, p_tmp_node)
+		{
+			if(p_node->thread_done == 1)
+			{
+				pthread_join(p_node->tid, NULL);
+				SLIST_REMOVE(&thread_list, p_node, thread_slist_s, entries);
+				free(p_node);
+			}
+		}
 	}
 
-	// close connection and remove data file
-	close(client_fd);
+	// on signal, join all threads, remove data file and close log.
+
+	thread_slist_t *p_node;
+	thread_slist_t *p_tmp_node;
+
+	SLIST_FOREACH_SAFE(p_node, &thread_list, entries, p_tmp_node)
+	{
+		pthread_join(p_node->tid, NULL);
+		SLIST_REMOVE(&thread_list, p_node, thread_slist_s, entries);
+		free(p_node);
+	}
+	
+	pthread_join(ts_tid, NULL);
+
 	remove(DATA_FILE_PATH);
 	closelog();
 	return 0;
 }
 
+/*		***********************************
+		Private functions defenition
+		***********************************
+*/
 
 int get_client_ip(struct sockaddr_storage client_addr, char* ipstr, size_t ipstr_len)
 {
@@ -234,4 +294,80 @@ void handle_signal( int signo )
 		printf("Caught signal, exiting\n");
 		stop_requested = 1;
 	}
+}
+
+void *thread_handle_client(void *arg)
+{
+	thread_args_t *p_thread_args = ((thread_args_t*)arg);
+	char buffer[BUF_SIZE];
+	int data_fd= open(DATA_FILE_PATH, O_CREAT|O_WRONLY|O_APPEND, 0644);
+	if(data_fd == -1 )
+	{
+		printf("failed to open data file");
+		pthread_exit(NULL);
+	}
+
+	// receive until new line
+	int bytes_read= 0;
+	
+	while ((bytes_read = recv(p_thread_args->client_fd, buffer, BUF_SIZE, 0)) > 0)
+	{
+		pthread_mutex_lock(&file_mutex);
+		write(data_fd, buffer, bytes_read);
+		pthread_mutex_unlock(&file_mutex);
+		if(memchr(buffer, '\n', bytes_read)) break;
+	}
+	
+	close(data_fd);
+
+	// send collected data
+	data_fd = open(DATA_FILE_PATH, O_RDONLY);
+	while ((bytes_read = read(data_fd, buffer, BUF_SIZE)) > 0)
+	{
+		send(p_thread_args->client_fd, buffer, bytes_read, 0);
+	}
+	close(data_fd);
+	
+
+	close(p_thread_args->client_fd);
+
+
+	syslog(LOG_INFO, "Closed connection from %s", p_thread_args->ipstr);
+	printf("Closed connection from %s\n", p_thread_args->ipstr);
+
+	*(p_thread_args->p_thread_done) = 1;
+	free(p_thread_args);
+	return NULL;
+}
+
+void *thread_timestamp(void *arg)
+{
+	(void)arg;
+	time_t last_stamp = time(NULL);
+	while (!stop_requested)
+	{
+		sleep(1);
+		time_t now = time(NULL);
+
+		if (difftime(now, last_stamp) >= 10.0)
+		{
+			last_stamp = now;
+			struct tm *time_info = localtime(&now);
+			char timestamp[64]= {0};
+			strftime(timestamp, sizeof(timestamp), "timestamp: %Y-%m-%d %H:%M:%S\n", time_info);
+
+			int data_fd= open(DATA_FILE_PATH, O_CREAT|O_WRONLY|O_APPEND, 0644);
+			if(data_fd == -1 )
+			{
+				printf("failed to open data file for writing timestamp");
+				pthread_exit(NULL);
+			}
+			pthread_mutex_lock(&file_mutex);
+			write(data_fd, timestamp, strlen(timestamp));
+			printf("%s", timestamp);
+			pthread_mutex_unlock(&file_mutex);
+			close(data_fd);
+		}
+	}
+	return NULL;
 }
