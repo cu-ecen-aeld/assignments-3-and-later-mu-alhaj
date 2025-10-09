@@ -100,13 +100,23 @@ int main ( int argc, char *argv[])
 		exit(1);
 	}
 
-	if (bind(sock_fd, p_res->ai_addr, p_res->ai_addrlen) == -1)
+	int bind_ret = 0;
+	// try to bind couple of time before failing.
+	for (int i = 0; i < 5; i++)
+	{
+		bind_ret = bind(sock_fd, p_res->ai_addr, p_res->ai_addrlen);
+		if (bind_ret == 0) break;
+		else sleep(1);
+		
+	}
+	if (bind_ret == -1)
 	{
 		printf("failed to bind the socket\n");
 		freeaddrinfo(p_res);
 		close(sock_fd);
 		exit(1);
 	}
+	
 
 	printf("socket was created and bound to port %s \n", PORT);
 	freeaddrinfo(p_res);
