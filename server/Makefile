@@ -21,7 +21,7 @@ all: $(TARGET)
 
 # rule to build target
 $(TARGET) : $(OBJ)
-	$(CC) $(CFLAGS) $(OBJ) -o $(TARGET)
+	$(CC) $(CFLAGS) $(LDFLAGS) $(OBJ) -o $(TARGET)
 	
 # rule to get the OBJ, where $< is the first dependency .c and $@ is the target
 %.o : %.c 
