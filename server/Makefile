@@ -3,10 +3,8 @@
 CC ?= gcc
 
 # make it possible to cross-compile
-# if CROSS_COMPILE is empty, set CC to gcc, otherwise use the CROSS_COMPILE
-ifeq ($(CROSS_COMPILE),)		
-	CC := gcc
-else
+# if CROSS_COMPILE is not empty,  use the CROSS_COMPILE
+ifneq ($(CROSS_COMPILE),)	
 	CC := $(CROSS_COMPILE)gcc
 endif
 
