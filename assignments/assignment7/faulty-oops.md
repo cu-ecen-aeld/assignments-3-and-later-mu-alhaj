@@ -1,4 +1,6 @@
-echo "hello_world" > /dev/faulty
+# Assignment 7-2 f
+## kernel oops when running: echo "hello_world" > /dev/faulty
+```
 Unable to handle kernel NULL pointer dereference at virtual address 0000000000000000
 Mem abort info:
   ESR = 0x0000000096000045
@@ -41,3 +43,51 @@ Call trace:
  el0t_64_sync+0x18c/0x190
 Code: d2800001 d2800000 d503233f d50323bf (b900003f)
 ---[ end trace 0000000000000000 ]---
+```
+## Analysis 
+Asked chatgpt to analys the oops and this was the answer:
+The kernel oops shows a NULL pointer dereference, triggered intentionally by your module.
+
+### Root cause: 
+The ```faulty_write()``` function contains:
+```*(int *)0 = 0;```
+This attempts to write to virtual address 0x0, which is not mapped in kernel space, causing a data abort exception (segmentation fault inside the kernel).
+
+###Oops analysis (line-by-line)
+
+"Unable to handle kernel NULL pointer dereference at virtual address 0000000000000000"
+→ The CPU tried to write to memory address 0x0.
+
+"ESR = 0x0000000096000045"
+→ ESR (Exception Syndrome Register) gives detailed fault info.
+
+EC = 0x25: Data abort from a current exception level (EL1 = kernel).
+
+WnR = 1: Write, not read.
+
+This matches *(int *)0 = 0 (write to NULL).
+
+"pc : faulty_write+0x10/0x20 [faulty]"
+→ The Program Counter was 0x10 bytes into the faulty_write() function when the crash occurred.
+→ In your code, this corresponds directly to the line *(int *)0 = 0;.
+
+"lr : vfs_write+0xc8/0x390"
+→ The function vfs_write() called your module’s faulty_write() through the file operations structure.
+
+"Call trace:"
+
+faulty_write+0x10/0x20 [faulty]
+ksys_write
+__arm64_sys_write
+invoke_syscall
+el0_svc_common
+...
+
+### Locating the faulty line
+
+Use addr2line or gdb with your kernel’s vmlinux and the compiled faulty.ko:
+
+```addr2line -e faulty.ko 0x10```
+
+
+This returns the exact C source line (it will point to *(int *)0 = 0;).
